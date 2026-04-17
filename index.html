@@ -1726,7 +1726,7 @@ function renderDeals(){
   });
   let groups=Array.from(grouped.values());
   // Default sort: largest Period Rev first
-  groups.sort((a,b)=>S.sortD*(b.pv-a.pv));
+  groups.sort((a,b)=>(b.pv-a.pv)*(-S.sortD));
   const show=groups.slice(0,250);
   let periTotal=0,bokTotal=0,oppTotal=0,wtdTotal=0;
   $('deal-tbody').innerHTML=show.map(g=>{
