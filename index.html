@@ -1517,8 +1517,8 @@ function makeVPCard(ms){
   </div>
 </div>
 <div class="cp-metrics-row">
-  <div class="cp-metric"><div class="cp-metric-lbl">Portfolio Retention</div><div class="cp-metric-val ${retCls}">${retDisplay}</div></div>
-  <div class="cp-metric"><div class="cp-metric-lbl">Rev Growth</div><div class="cp-metric-val ${growthCls}">${growthDisplay}</div></div>
+  <div class="cp-metric"><div class="cp-metric-lbl">Portfolio Retention</div><div class="cp-metric-val ${retCls}">${retDisplay}</div><div style="font-size:8px;color:var(--text3);">${Math.min(m.currAAB,m.prevAAB)}/${m.prevAAB} clients</div></div>
+  <div class="cp-metric"><div class="cp-metric-lbl">Rev Growth</div><div class="cp-metric-val ${growthCls}">${growthDisplay}</div><div style="font-size:8px;color:var(--text3);">${fm(m.currRev)} vs ${fm(m.prevRev)}</div></div>
   <div class="cp-metric"><div class="cp-metric-lbl">Clue Booked</div><div class="cp-metric-val">${fm(clueBooked)}</div><div style="font-size:8px;color:var(--text3);">of ${fm(vpClueQ)} plan</div></div>
   <div class="cp-metric"><div class="cp-metric-lbl">Wrango CP Booked</div><div class="cp-metric-val">${fm(wrangoBooked)}</div><div style="font-size:8px;color:var(--text3);">of ${fm(vpWrangoQ)} plan</div></div>
 </div>
