@@ -1422,10 +1422,10 @@ function renderCPGrid(ms){
 
 // ── CARD BUILDERS ─────────────────────────────────────────────────────────────
 // All Wrango net-new booked from deals (for Carlos card).
-// Always uses effNN (reconciled classification) so it stays in sync with the
-// NN Reconciliation table regardless of which mode toggle the user has selected.
+// Uses isNN() so it responds to the original/reconciled mode toggle,
+// staying in sync with the NN Reconciliation table header total.
 function wrangoNNBooked(ms){
-  return getDeals().filter(d=>d.bu==='wrango'&&effNN(d)&&d.probability===100)
+  return getDeals().filter(d=>d.bu==='wrango'&&isNN(d)&&d.probability===100)
     .reduce((s,d)=>s+ms.reduce((t,m)=>t+(dMonth(d,m)),0),0);
 }
 
@@ -2386,7 +2386,7 @@ ${repBreakdownHtml}
   });
 
   let totNN=0,totRec=0;
-  deals.forEach(d=>{if(effNN(d))totNN+=ms.reduce((s,m)=>s+(dMonth(d,m)),0);else totRec+=ms.reduce((s,m)=>s+(dMonth(d,m)),0);});
+  deals.forEach(d=>{if(isNN(d))totNN+=ms.reduce((s,m)=>s+(dMonth(d,m)),0);else totRec+=ms.reduce((s,m)=>s+(dMonth(d,m)),0);});
 
   const params=`<div class="nn-params">
 <strong>Net-New Classification Rules (HCP)</strong><br>
