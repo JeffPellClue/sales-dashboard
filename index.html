@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 :root{
   --blue:#2337E8;--blue-dk:#0d1b5e;--blue-lt:#eaeefd;
@@ -167,6 +168,8 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);font-size:14
 .ftab.on{border-color:var(--blue);background:var(--blue-lt);color:var(--blue);}
 .dsrch{margin-left:auto;padding:4px 11px;border:1.5px solid var(--border);border-radius:100px;font-size:11px;font-family:var(--font);outline:none;width:180px;}
 .dsrch:focus{border-color:var(--blue);}
+.dl-btn{padding:4px 11px;border-radius:100px;font-size:10px;font-weight:700;cursor:pointer;border:1.5px solid var(--border);color:var(--text2);background:var(--white);font-family:var(--font);transition:all .1s;}
+.dl-btn:hover{border-color:var(--blue);color:var(--blue);background:var(--blue-lt);}
 .dfrow{padding:6px 16px 8px;border-bottom:1px solid var(--border);display:flex;gap:7px;align-items:center;flex-wrap:wrap;}
 .dfrow span{font-size:10px;font-weight:700;color:var(--text3);}
 .dsel{padding:4px 9px;border:1.5px solid var(--border);border-radius:100px;font-size:10px;font-family:var(--font);font-weight:600;color:var(--text2);background:var(--white);cursor:pointer;outline:none;}
@@ -691,6 +694,8 @@ tr:hover td{background:#f8f9fe;}
               <span class="ftab" onclick="fltStage('pipeline',this)">Pipeline</span>
             </div>
             <input class="dsrch" type="text" placeholder="Search client or rep…" oninput="onSrch(this.value)"/>
+            <button class="dl-btn" onclick="downloadDeals('csv')" title="Download current view as CSV">↓ CSV</button>
+            <button class="dl-btn" onclick="downloadDeals('xlsx')" title="Download current view as Excel">↓ XLSX</button>
           </div>
           <div class="dfrow">
             <span>Filter:</span>
@@ -1772,6 +1777,76 @@ function renderDeals(){
 const fltStage=(s,el)=>{S.stageF=s;document.querySelectorAll('.ftab').forEach(t=>t.classList.remove('on'));el.classList.add('on');renderDeals();};
 const onSrch=v=>{S.srch=v;renderDeals();};
 const srt=f=>{S.sortF===f?S.sortD*=-1:(S.sortF=f,S.sortD=-1);renderDeals();};
+
+function downloadDeals(fmt){
+  const ms=S.months;
+  let deals=getDeals().filter(d=>inP(d,ms));
+  const repF=$('f-rep').value,buF=$('f-bu').value,typeF=$('f-type').value;
+  if(repF!=='all')deals=deals.filter(d=>d.rep===repF);
+  if(buF!=='all')deals=deals.filter(d=>d.bu===buF);
+  if(typeF!=='all')deals=deals.filter(d=>d.rev_type===typeF);
+  if(S.stageF==='booked')deals=deals.filter(d=>d.probability===100);
+  if(S.stageF==='pipeline')deals=deals.filter(d=>d.probability<100);
+  if(S.pipeF==='booked')deals=deals.filter(d=>d.probability===100);
+  else if(S.pipeF==='bkdhigh')deals=deals.filter(d=>d.probability===100||(d.probability>=50&&d.probability<=90));
+  else if(S.pipeF==='netnew')deals=deals.filter(d=>d.probability===100&&isNN(d));
+  if(S.stageProbs.size>0)deals=deals.filter(d=>S.stageProbs.has(d.probability));
+  if(S.srch){const q=S.srch.toLowerCase();deals=deals.filter(d=>((d.agency||'')+(d.advertiser||'')+(d.rep||'')+(d.campaign||d.io_group_name||'')).toLowerCase().includes(q));}
+  // Group same as renderDeals but export ALL (no 250 cap)
+  const grouped=new Map();
+  deals.forEach(d=>{
+    const cl=d.agency||d.advertiser||'—';
+    const cmpRaw=d.campaign||d.io_group_name||'';
+    const gk=cl+'||'+cmpRaw;
+    if(!grouped.has(gk)){grouped.set(gk,{cl,cmpRaw,rep:d.rep,bu:d.bu,rev_type:d.rev_type,probability:d.probability,pv:0,booked:0,start:d.start||'',end:d.end||''});}
+    const g=grouped.get(gk);
+    const pv=ms.reduce((s,m)=>s+dMonth(d,m),0);
+    const dBk=d.booked!=null?d.booked:Object.values(d.monthly||{}).reduce((s,v)=>s+(+v||0),0);
+    g.pv+=pv;g.booked+=dBk;
+    if(d.start&&(!g.start||d.start<g.start))g.start=d.start;
+    if(d.end&&(!g.end||d.end>g.end))g.end=d.end;
+  });
+  const groups=Array.from(grouped.values()).sort((a,b)=>b.pv-a.pv);
+  const qMap={[JSON.stringify([1,2,3])]:'Q1',[JSON.stringify([4,5,6])]:'Q2',[JSON.stringify([7,8,9])]:'Q3',[JSON.stringify([10,11,12])]:'Q4'};
+  const periodLabel=qMap[JSON.stringify(ms)]||('M'+ms.join('-'));
+  const today=new Date().toISOString().slice(0,10);
+  const filename='deals_'+periodLabel+'_'+today;
+  const rows=groups.map(g=>({
+    'Client':g.cl,
+    'Campaign':g.cmpRaw,
+    'Rep':g.rep||'',
+    'BU':g.bu==='clue'?'Clue Digital':'Wrango',
+    'Type':g.rev_type==='net_new'?'Net-New':'Recurring',
+    'Status':g.probability===100?'Booked':g.probability+'%',
+    'Start':g.start,
+    'End':g.end,
+    'Total Opp Value':Math.round(g.booked),
+    'Period Rev':Math.round(g.pv),
+    'Period Rev Wtd':Math.round(g.pv*(g.probability/100))
+  }));
+  if(!rows.length){alert('No deals match the current filters.');return;}
+  if(fmt==='csv'){
+    const headers=Object.keys(rows[0]);
+    const csv=[headers.join(','),...rows.map(r=>headers.map(h=>{
+      const v=r[h];const s=String(v==null?'':v);
+      return(s.includes(',')||s.includes('"')||s.includes('\n'))?'"'+s.replace(/"/g,'""')+'"':s;
+    }).join(','))].join('\n');
+    const blob=new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8;'});
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement('a');a.href=url;a.download=filename+'.csv';a.click();URL.revokeObjectURL(url);
+  } else {
+    const ws=XLSX.utils.json_to_sheet(rows);
+    const headers=Object.keys(rows[0]);
+    ['Total Opp Value','Period Rev','Period Rev Wtd'].forEach(col=>{
+      const ci=headers.indexOf(col);if(ci<0)return;
+      const colL=String.fromCharCode(65+ci);
+      for(let r=2;r<=rows.length+1;r++){const c=ws[colL+r];if(c){c.z='"$"#,##0';}}
+    });
+    ws['!cols']=headers.map((h,i)=>({wch:Math.max(h.length+2,[20,35,18,14,12,10,12,12,18,12,16][i]||14)}));
+    const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Deals');
+    XLSX.writeFile(wb,filename+'.xlsx');
+  }
+}
 
 // ── ALERTS ────────────────────────────────────────────────────────────────────
 function renderAlerts(){
