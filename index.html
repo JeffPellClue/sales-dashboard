@@ -1583,6 +1583,7 @@ function makeDirCard(name,bu,ms){
   const aClass=pct!==null?ac(pct):'dim';
   const cps=bu==='clue'?D.org.clue.cps:D.org.wrango.cps;
   const m=dirMetrics(bu,ms);
+  const isWrango=bu==='wrango';
   const growthPct=m.growth!==null?m.growth-1:null;
   const growthDisplay=growthPct!==null?((growthPct>=0?'+':'')+Math.round(growthPct*100)+'%'):'—';
   const growthCls=growthPct===null?'dim':growthPct>=0.1?'ok':growthPct>=0?'warn':growthPct>=-0.1?'orange':'red';
@@ -1596,12 +1597,13 @@ function makeDirCard(name,bu,ms){
   else h+='<div class="ptot-q">team booked</div>';
   h+='</div></div>';
   h+='<div class="cp-metrics-row">';
-  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Team Retention</div><div class="cp-metric-val ${retCls}">${retDisplay}</div><div style="font-size:8px;color:var(--text3);">${Math.min(m.currAAB,m.prevAAB)}/${m.prevAAB} clients</div></div>`;
-  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Rev Growth</div><div class="cp-metric-val ${growthCls}">${growthDisplay}</div><div style="font-size:8px;color:var(--text3);">${fm(m.currRev)} vs ${fm(m.prevRev)}</div></div>`;
+  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Team Retention</div><div class="cp-metric-val ${retCls}">${retDisplay}</div><div style="font-size:8px;color:var(--text3);">${Math.min(m.currAAB,m.prevAAB)}/${m.prevAAB} ${isWrango?'recurring accts':'clients'}</div></div>`;
+  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Rev Growth</div><div class="cp-metric-val ${growthCls}">${growthDisplay}</div><div style="font-size:8px;color:var(--text3);">${fm(m.currRev)} vs ${fm(m.prevRev)}${isWrango?' recurring':''}</div></div>`;
   h+=`<div class="cp-metric"><div class="cp-metric-lbl">Profitability</div><div class="cp-metric-val dim">—</div><div style="font-size:8px;color:var(--text3);">vs 60% target</div></div>`;
   h+='</div>';
-  h+='<div class="qbars">'+qBarMain('Team Booked',q,a);
+  h+='<div class="qbars">'+qBarMain(isWrango?'Team Booked (recurring)':'Team Booked',q,a);
   h+='<div style="font-size:9px;color:var(--text3);margin-top:4px;font-style:italic;">Aggregates: '+[...cpsInBU,name].map(esc).join(' · ')+'</div>';
+  if(isWrango)h+=`<div style="font-size:9px;color:var(--text3);margin-top:2px;font-style:italic;">Retention/Growth = recurring accounts &amp; recurring revenue only (net-new excluded). Team Booked = sum of each CP's own recurring revenue vs their own quota.</div>`;
   h+='</div></div>';
   return h;
 }
@@ -1612,6 +1614,7 @@ function makeCPCard(name,bu,ms){
   const pct=q>0?Math.min(a/q*100,200):null;
   const totAc=pct!==null?ac(pct):'dim';
   const m=cpMetrics(name,bu,ms);
+  const isWrango=bu==='wrango';
   // Revenue growth as % change: (curr/prev - 1) * 100
   const growthPct=m.growth!==null?m.growth-1:null;
   const growthDisplay=growthPct!==null?((growthPct>=0?'+':'')+Math.round(growthPct*100)+'%'):'—';
@@ -1626,10 +1629,12 @@ function makeCPCard(name,bu,ms){
   else h+='<div class="ptot-q">booked</div>';
   h+='</div></div>';
   h+='<div class="cp-metrics-row">';
-  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Retention</div><div class="cp-metric-val ${retCls}">${retDisplay}</div><div style="font-size:8px;color:var(--text3);">${Math.min(m.currAAB,m.prevAAB)}/${m.prevAAB} clients</div></div>`;
-  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Rev Growth</div><div class="cp-metric-val ${growthCls}">${growthDisplay}</div><div style="font-size:8px;color:var(--text3);">${fm(m.currRev)} vs ${fm(m.prevRev)}</div></div>`;
+  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Retention</div><div class="cp-metric-val ${retCls}">${retDisplay}</div><div style="font-size:8px;color:var(--text3);">${Math.min(m.currAAB,m.prevAAB)}/${m.prevAAB} ${isWrango?'recurring accts':'clients'}</div></div>`;
+  h+=`<div class="cp-metric"><div class="cp-metric-lbl">Rev Growth</div><div class="cp-metric-val ${growthCls}">${growthDisplay}</div><div style="font-size:8px;color:var(--text3);">${fm(m.currRev)} vs ${fm(m.prevRev)}${isWrango?' recurring':''}</div></div>`;
   h+='</div>';
-  h+='<div class="qbars">'+qBarMain('Acct Plan',q,a)+'</div></div>';
+  h+='<div class="qbars">'+qBarMain(isWrango?'Acct Plan (recurring)':'Acct Plan',q,a)+'</div>';
+  if(isWrango)h+=`<div style="font-size:9px;color:var(--text3);margin-top:4px;font-style:italic;">Retention/Growth = recurring accounts &amp; recurring revenue only (net-new excluded). Acct Plan = this CP's own recurring revenue booked vs their quota.</div>`;
+  h+='</div>';
   return h;
 }
 
