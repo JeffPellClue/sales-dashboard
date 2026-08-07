@@ -939,32 +939,16 @@ function cpQuota(cpName,ms){
   if(!cq)return 0;
   return ms.reduce((s,m)=>s+(cq[m]||cq[String(m)]||0),0);
 }
-// Total recurring-only Wrango revenue across the whole BU — the shared "actual"
-// figure behind every Wrango CP/Director attainment bar (2026-07-28, per JP):
-// attainment vs. plan for Ira/Naum/Manar should reflect ALL Wrango recurring
-// revenue, not just revenue tied to whichever accounts happen to be attributed
-// to that specific person — the deal-level Account Manager doesn't have to
-// match the client list that originally built each person's quota. Supersedes
-// the 2026-07-27 per-CP recurring-only scoping for this specific figure.
-function wrangoRecurringBooked(ms){
-  let actual=0,pipeline=0;
-  getDeals().forEach(d=>{
-    if(d.bu!=='wrango'||d.rev_type!=='recurring')return;
-    const v=ms.reduce((s,m)=>s+(dMonth(d,m)),0);
-    if(!v)return;
-    if(d.probability===100)actual+=v;else pipeline+=v*d.probability/100;
-  });
-  return{actual,pipeline};
-}
 function cpActuals(cpName,bu,ms){
-  // Wrango: shared BU-wide recurring total, not scoped to this person's own
-  // accounts (see wrangoRecurringBooked() above). Clue Digital is unaffected —
-  // still scoped per-CP via dealCP()/account_map below.
-  if(bu==='wrango')return wrangoRecurringBooked(ms);
   const accts=cpAcctSet(cpName,bu);
   const target=normCPName(cpName);
   const matching=getDeals().filter(d=>{
     if(d.bu!==bu)return false;
+    // Wrango account-plan bar is each CP's own recurring book only (2026-07-29,
+    // per JP correction — reverts the 2026-07-28 "shared BU-wide total" attempt,
+    // which incorrectly showed the same $412K on every Wrango CP's bar). Net-new
+    // at Wrango accounts still belongs to the sales reps' quota, not the CP's.
+    if(bu==='wrango'&&d.rev_type!=='recurring')return false;
     // Primary: per-opportunity Account Manager (falls back to account_map inside dealCP)
     const resolved=normCPName(dealCP(d));
     if(resolved)return resolved===target;
@@ -1001,14 +985,11 @@ function dealBUSplit(bu,ms){
   });
   return{recBkd,nnBkd,recPipe,nnPipe};
 }
-// All booked revenue managed by CPs of a BU (for Aryana/Manar roll-up).
-// Wrango: cpActuals() already returns the one shared BU-wide recurring total
-// for every CP/director, so summing over cps+dir would triple-count — use the
-// shared helper directly instead. Clue is unaffected (still additive per-CP).
+// All booked revenue managed by CPs of a BU (for Aryana/Manar roll-up) —
+// additive sum of each CP's own cpActuals() (per-CP scoped for both BUs).
 function cpBUBooked(bu,ms){
-  if(bu==='wrango')return wrangoRecurringBooked(ms).actual;
-  const cps=D.org.clue.cps;
-  const dir=D.org.clue.director;
+  const cps=bu==='clue'?D.org.clue.cps:D.org.wrango.cps;
+  const dir=bu==='clue'?D.org.clue.director:D.org.wrango.director;
   return [...cps,dir].reduce((s,cp)=>s+cpActuals(cp,bu,ms).actual,0);
 }
 // BU monthly quota helper
@@ -1030,35 +1011,24 @@ function buSum(bu,ms){
       if(rt==='net_new'){nnq+=pdSum(name,bu,rt,ms,'quota');nna+=pdSum(name,bu,rt,ms,'actual');}
     });
   }
-  // Add CP actuals for CPs not in people_data. Wrango: cpActuals() returns the
-  // same shared BU-wide total for every CP, so add it once instead of looping
-  // (looping would double/triple-count — see cpBUBooked() above).
+  // Add CP actuals for CPs not in people_data (additive per-CP, both BUs).
   const cps=bu==='clue'?D.org.clue.cps:D.org.wrango.cps;
-  if(bu==='wrango'){
-    const{actual:ca,pipeline:cp2}=wrangoRecurringBooked(ms);a+=ca;p+=cp2;
-  }else{
-    cps.forEach(cp=>{
-      if(!D.people_data[cp]||!D.people_data[cp][bu]){
-        const{actual:ca,pipeline:cp2}=cpActuals(cp,bu,ms);a+=ca;p+=cp2;
-      }
-    });
-  }
+  cps.forEach(cp=>{
+    if(!D.people_data[cp]||!D.people_data[cp][bu]){
+      const{actual:ca,pipeline:cp2}=cpActuals(cp,bu,ms);a+=ca;p+=cp2;
+    }
+  });
   return{q,a,p,nnq,nna};
 }
 
 // CP-only totals for the CP tab BU headers
 function cpBUSum(bu,ms){
   const cps=bu==='clue'?D.org.clue.cps:D.org.wrango.cps;
+  let q=0,a=0,p=0;
+  cps.forEach(cp=>{q+=cpQuota(cp,ms);const{actual:ca,pipeline:cp2}=cpActuals(cp,bu,ms);a+=ca;p+=cp2;});
+  // Add director's own account quota + actuals
   const dir=bu==='clue'?D.org.clue.director:D.org.wrango.director;
-  let q=cps.reduce((s,cp)=>s+cpQuota(cp,ms),0)+(dir?cpQuota(dir,ms):0);
-  if(bu==='wrango'){
-    // Shared BU-wide total, not additive per-CP/director — see cpBUBooked() above.
-    const{actual:a,pipeline:p}=wrangoRecurringBooked(ms);
-    return{q,a,p};
-  }
-  let a=0,p=0;
-  cps.forEach(cp=>{const{actual:ca,pipeline:cp2}=cpActuals(cp,bu,ms);a+=ca;p+=cp2;});
-  if(dir){const{actual:da,pipeline:dp}=cpActuals(dir,bu,ms);a+=da;p+=dp;}
+  if(dir){q+=cpQuota(dir,ms);const{actual:da,pipeline:dp}=cpActuals(dir,bu,ms);a+=da;p+=dp;}
   return{q,a,p};
 }
 
@@ -2315,9 +2285,8 @@ function renderSummary(){
     const cnQ=pdSum('Carlos Naranjo','wrango','net_new',ms,'quota');
     const nnPct=cnQ>0?nnA/cnQ*100:null;
 
-    // Wrango CP renewals — shared BU-wide recurring total, not additive per-CP
-    // (cpActuals() returns the same number for every Wrango CP — see cpBUBooked()).
-    const wrangoRenewBkd=wrangoRecurringBooked(ms).actual;
+    // Wrango CP renewals
+    const wrangoRenewBkd=D.org.wrango.cps.reduce((s,cp)=>s+cpActuals(cp,'wrango',ms).actual,0);
     const wrangoRenewQ=D.org.wrango.cps.reduce((s,cp)=>s+cpQuota(cp,ms),0);
     const wRenewPct=wrangoRenewQ>0?wrangoRenewBkd/wrangoRenewQ*100:null;
 
