@@ -848,15 +848,114 @@ const setT=(id,v)=>{const e=$(id);if(e)e.textContent=v;};
 const setH=(id,v)=>{const e=$(id);if(e)e.innerHTML=v;};
 
 // ── NN RECONCILIATION MODE ────────────────────────────────────────────────────
-// effNN: applies leadership Accept/Reject decisions on top of model classification
-function nnDealId(d){return[d.campaign||'',d.channel||'',d.start||'',d.end||''].join('|');}
+// dealChannel: the real media channel, parsed from Datorama's IO Key (2026-07-30).
+// IO Key already encodes agency_advertiser_brand_channel_campaign_objective_segment
+// as 7 underscore-delimited fields for ~91% of deals (Finance Adjustments and a
+// handful of manually-keyed SF opps without a real platform-level media buy don't
+// have this — those return ''). NOTE: d.channel is a completely different field
+// (Campaign Type — "Healthcare HCP"/"General") and is NOT the media channel.
+function dealChannel(d){
+  const k=d&&d.io_key;
+  if(!k)return'';
+  const parts=k.split('_');
+  if(parts.length<7)return'';
+  return parts[3]||'';
+}
+// rawBizTypeIsNN: what Salesforce's own Business Type says, with no reconciliation.
+function rawBizTypeIsNN(d){
+  const b=(d.raw_biz_type||d.biz_type||'').toLowerCase();
+  return b.indexOf('new')>-1&&b.indexOf('existing')<0;
+}
+// buildWrangoNNIndex: scans every booked (100%) Wrango deal across ALL history
+// (not just the selected period) and finds, per Agency|Advertiser|Brand and per
+// Agency|Advertiser|Brand|Channel, the earliest start date and the set of
+// campaign name(s) that share it — i.e. the "founding" campaign for that combo.
+// Memoized: D.deals doesn't change within a page load, only recomputeActuals()
+// callers need a fresh read, and they all go through liveWrangoNN() which reads
+// this same cache.
+let _wrangoNNIndexCache=null;
+function buildWrangoNNIndex(){
+  if(_wrangoNNIndexCache)return _wrangoNNIndexCache;
+  const aab={},aabc={};
+  D.deals.forEach(d=>{
+    if(d.bu!=='wrango'||d.probability!==100||!d.start)return;
+    const ag=(d.agency||'').trim(),adv=(d.advertiser||'').trim(),br=(d.brand||'').trim();
+    const ch=dealChannel(d);
+    const kAAB=ag+'|'+adv+'|'+br;
+    const pairs=[[aab,kAAB]];
+    if(ch)pairs.push([aabc,kAAB+'|'+ch]);
+    pairs.forEach(([map,key])=>{
+      if(!map[key]){map[key]={minStart:d.start,campaigns:new Set([d.campaign])};}
+      else if(d.start<map[key].minStart){map[key].minStart=d.start;map[key].campaigns=new Set([d.campaign]);}
+      else if(d.start===map[key].minStart){map[key].campaigns.add(d.campaign);}
+    });
+  });
+  _wrangoNNIndexCache={aab,aabc};
+  return _wrangoNNIndexCache;
+}
+// NN_MANUAL_RECURRING_OVERRIDE: known agency|advertiser combos that look like
+// a brand-new client to the founding-set algorithm (first time this exact
+// advertiser label appears) but are actually the same underlying client under
+// a different brand/division name, so they should never get net-new credit.
+// Added 2026-08-12 per JP: MiniMed is Medtronic's diabetes-care brand/spin-off,
+// not a separate client — always Recurring regardless of algorithmic result.
+const NN_MANUAL_RECURRING_OVERRIDE=new Set([
+  'MiniMed|MiniMed'
+]);
+// liveWrangoNN: channel-aware Net-New classification, recomputed live from real
+// deal data (2026-07-30) — replaces the old frozen custom_nn snapshot for Wrango.
+//  ① First-ever Agency/Advertiser/Brand combo -> NN for that founding campaign's full run.
+//  ② First-ever channel for a known combo -> NN for that channel's founding campaign's full run.
+//  Manual overrides (above) always win and short-circuit both rules.
+function liveWrangoNN(d){
+  if(d.bu!=='wrango')return d.rev_type==='net_new';
+  const ag=(d.agency||'').trim(),adv=(d.advertiser||'').trim(),br=(d.brand||'').trim();
+  if(NN_MANUAL_RECURRING_OVERRIDE.has(ag+'|'+adv))return false;
+  const{aab,aabc}=buildWrangoNNIndex();
+  const ch=dealChannel(d);
+  const kAAB=ag+'|'+adv+'|'+br;
+  const aabEntry=aab[kAAB];
+  if(aabEntry&&aabEntry.campaigns.has(d.campaign))return true;
+  const aabcEntry=ch?aabc[kAAB+'|'+ch]:null;
+  if(aabcEntry&&aabcEntry.campaigns.has(d.campaign))return true;
+  return false;
+}
+// liveWrangoNNReason: human-readable explanation for the reconciliation table,
+// only meaningful when liveWrangoNN(d) disagrees with rawBizTypeIsNN(d).
+function liveWrangoNNReason(d){
+  const modelIsNN=liveWrangoNN(d),rawIsNN=rawBizTypeIsNN(d);
+  if(modelIsNN===rawIsNN)return'';
+  const ag=(d.agency||'').trim(),adv=(d.advertiser||'').trim(),br=(d.brand||'').trim();
+  const label=ag+' / '+adv+(br?' / '+br:'');
+  const rawBT=d.raw_biz_type||d.biz_type||(modelIsNN?'Existing Business':'New Business');
+  if(NN_MANUAL_RECURRING_OVERRIDE.has(ag+'|'+adv)){
+    return`Manual override — ${label} is a known brand/spin-off of an existing client, so Recurring regardless of model`;
+  }
+  const{aab}=buildWrangoNNIndex();
+  const ch=dealChannel(d);
+  if(modelIsNN){
+    const aabEntry=aab[ag+'|'+adv+'|'+br];
+    if(aabEntry&&aabEntry.campaigns.has(d.campaign)){
+      return`Labelled '${rawBT}' but qualifies as Net-New — first-ever campaign for ${label} (since ${(aabEntry.minStart||'').slice(0,7)})`;
+    }
+    return`Labelled '${rawBT}' but qualifies as Net-New — new channel '${ch||'(none)'}' for existing ${label}`;
+  }
+  return`Labelled '${rawBT}' but this ${ch?`channel '${ch}'`:'combo'} already existed for ${label} before this campaign, so Recurring`;
+}
+// nnDealId: stable per-deal key for leadership Accept/Reject decisions.
+function nnDealId(d){return d.io_key||[d.campaign||'',d.channel||'',d.start||'',d.end||''].join('|');}
+// effNN: applies leadership Accept/Reject decisions on top of the model classification.
 function effNN(d){
   const DEC=window.NN_DECISIONS||{};
   const id=nnDealId(d);
   if(DEC[id]==='accept')return true;
   if(DEC[id]==='reject')return false;
-  // If custom_nn has been explicitly set (true=NN, false=Recurring), respect it.
-  // If null/undefined (script hasn't processed this deal yet), fall back to SF rev_type.
+  // Wrango: live, channel-aware reconciliation (2026-07-30) — see liveWrangoNN()
+  // above. This is what now drives actual net-new quota via recomputeActuals(),
+  // not just this display layer.
+  if(d.bu==='wrango')return liveWrangoNN(d);
+  // Clue: no live reconciliation built yet — fall back to whatever the old
+  // one-time model snapshot set, else raw SF Business Type.
   if(d.custom_nn!=null)return!!d.custom_nn;
   return d.rev_type==='net_new';
 }
@@ -2474,7 +2573,11 @@ window.NN_DECISIONS=window.NN_DECISIONS||{};
 function applyNNDecision(id,action){
   if(action==='')delete window.NN_DECISIONS[id];
   else window.NN_DECISIONS[id]=action;
-  renderNNRec();
+  // Decisions now affect actual net-new quota (effNN feeds recomputeActuals()
+  // for Wrango, 2026-07-30) — not just this table's own display. Recompute
+  // and re-render everything so quota cards/BU headers update immediately.
+  recomputeActuals();
+  renderAll();
 }
 
 function buildNNFilterBar(allReps){
@@ -2500,57 +2603,56 @@ function renderNNRec(){
   const ms=S.months;
   const DEC=window.NN_DECISIONS;
 
-  // Base filter: HCP deals, booked, overlap selected period
-  const allHCPDeals=getDeals().filter(d=>{
+  // Base filter: Wrango deals, booked, overlap selected period. (2026-07-30 —
+  // broadened from the old camp_type-contains-"HCP" filter, which only covered
+  // 433 of 975 Wrango deals; bu==='wrango' covers all of them, matching the
+  // scope of the live reconciliation in effNN()/recomputeActuals().)
+  const allWrangoDeals=getDeals().filter(d=>{
     if(d.probability!==100)return false;
-    if(!d.camp_type||d.camp_type.toLowerCase().indexOf('hcp')<0)return false;
+    if(d.bu!=='wrango')return false;
     return ms.some(m=>dMonth(d,m)>0);
   });
 
   // Apply rep / agency / BU filters
-  let deals=allHCPDeals;
+  let deals=allWrangoDeals;
   if(S.nnRepF&&S.nnRepF!=='all')deals=deals.filter(d=>d.rep===S.nnRepF);
   if(S.nnAgencyF){const q=S.nnAgencyF.toLowerCase();deals=deals.filter(d=>(d.agency||'').toLowerCase().includes(q)||(d.advertiser||'').toLowerCase().includes(q));}
   if(S.nnBuF&&S.nnBuF!=='all')deals=deals.filter(d=>d.bu===S.nnBuF);
 
-  // Build unique rep list from all HCP deals for the filter dropdown
-  const allReps=[...new Set(allHCPDeals.map(d=>d.rep))].filter(Boolean).sort();
+  // Build unique rep list from all Wrango deals for the filter dropdown
+  const allReps=[...new Set(allWrangoDeals.map(d=>d.rep))].filter(Boolean).sort();
 
-  if(!deals.length){targets.forEach(s=>s.innerHTML=buildNNFilterBar(allReps)+'<div style="padding:16px 0;color:var(--text3);font-size:12px;">No HCP deals match the current filters.</div>');return;}
+  if(!deals.length){targets.forEach(s=>s.innerHTML=buildNNFilterBar(allReps)+'<div style="padding:16px 0;color:var(--text3);font-size:12px;">No Wrango deals match the current filters.</div>');return;}
   const sec=targets[0]; // used for innerHTML below; all targets get same content
 
-  // effNN and isNN defined globally above; DEC alias for readability
-  // ── Walk: raw BT → corrected → decisions applied
+  // dealChannel/liveWrangoNN/rawBizTypeIsNN/effNN/isNN defined globally above; DEC alias for readability
+  // ── Walk: raw BT → live model → decisions applied
   let rawNNTotal=0,adjPos=0,adjNeg=0,decPos=0,decNeg=0;
   deals.forEach(d=>{
     const v=ms.reduce((s,m)=>s+(dMonth(d,m)),0);
-    const rawBT=d.raw_biz_type||d.biz_type||'';
-    const rawIsNN=rawBT.toLowerCase().indexOf('new')>-1&&rawBT.toLowerCase().indexOf('existing')<0;
+    const rawIsNN=rawBizTypeIsNN(d);
     if(rawIsNN)rawNNTotal+=v;
-    if(d.nn_flag){
-      if(d.custom_nn&&!rawIsNN)adjPos+=v;
-      if(!d.custom_nn&&rawIsNN)adjNeg+=v;
-    }
+    const modelIsNN=liveWrangoNN(d);
+    if(modelIsNN&&!rawIsNN)adjPos+=v;
+    if(!modelIsNN&&rawIsNN)adjNeg+=v;
     // Decision delta vs model classification
     const id=nnDealId(d);
-    if(DEC[id]==='accept'&&!d.custom_nn)decPos+=v;
-    if(DEC[id]==='reject'&&d.custom_nn)decNeg+=v;
+    if(DEC[id]==='accept'&&!modelIsNN)decPos+=v;
+    if(DEC[id]==='reject'&&modelIsNN)decNeg+=v;
   });
   const corrNN=rawNNTotal+adjPos-adjNeg;
   const finalNN=corrNN+decPos-decNeg;
-  const rawNNCount=deals.filter(d=>{const b=(d.raw_biz_type||d.biz_type||'').toLowerCase();return b.indexOf('new')>-1&&b.indexOf('existing')<0;}).length;
-  const flagged=deals.filter(d=>d.nn_flag);
+  const rawNNCount=deals.filter(rawBizTypeIsNN).length;
+  const flagged=deals.filter(d=>liveWrangoNN(d)!==rawBizTypeIsNN(d));
   const decCount=Object.keys(DEC).length;
 
   // Per-rep NN breakdown (for reconciled view context) - MOVED BEFORE walkHtml
   const repNNMap={};
-  allHCPDeals.forEach(d=>{
+  allWrangoDeals.forEach(d=>{
     const pv=ms.reduce((s,m)=>s+dMonth(d,m),0);
     if(!pv)return;
     if(!repNNMap[d.rep])repNNMap[d.rep]={orig:0,rec:0};
-    const rawBT=(d.raw_biz_type||d.biz_type||'').toLowerCase();
-    const rawIsNN=rawBT.indexOf('new')>-1&&rawBT.indexOf('existing')<0;
-    if(rawIsNN)repNNMap[d.rep].orig+=pv;
+    if(rawBizTypeIsNN(d))repNNMap[d.rep].orig+=pv;
     if(effNN(d))repNNMap[d.rep].rec+=pv;
   });
   const repNNRows=Object.entries(repNNMap).sort((a,b)=>b[1].rec-a[1].rec).map(([rep,v])=>{
@@ -2558,23 +2660,25 @@ function renderNNRec(){
     const dStr=delta>0?`<span style="color:#16a34a;font-weight:700;">+${fm(delta)}</span>`:delta<0?`<span style="color:#dc2626;font-weight:700;">−${fm(Math.abs(delta))}</span>`:'—';
     return`<div class="nn-walk-row" style="padding:3px 0;"><span class="nn-walk-lbl">${esc(rep)}</span><span style="font-size:10px;color:var(--text2);">Orig: ${fm(v.orig)} · Rec: ${fm(v.rec)} · Δ: ${dStr}</span></div>`;
   }).join('');
-  const repBreakdownHtml=repNNRows?`<details style="margin-top:8px;"><summary style="font-size:10px;cursor:pointer;color:var(--blue);font-weight:700;">Per-Rep NN Breakdown (all HCP)</summary><div style="margin-top:6px;padding-left:8px;">${repNNRows}</div></details>`:'';
+  const repBreakdownHtml=repNNRows?`<details style="margin-top:8px;"><summary style="font-size:10px;cursor:pointer;color:var(--blue);font-weight:700;">Per-Rep NN Breakdown (all Wrango)</summary><div style="margin-top:6px;padding-left:8px;">${repNNRows}</div></details>`:'';
 
   const walkHtml=`<div class="nn-walk">
-<div class="nn-walk-title">Walk: Source "Business Type" → Model Classification → Leadership Decisions</div>
-<div class="nn-walk-row"><span class="nn-walk-lbl"><strong>Source data labelled "New Business"</strong> (${rawNNCount} of ${deals.length} HCP deals)</span><span class="nn-walk-amt">${fm(rawNNTotal)}</span></div>
+<div class="nn-walk-title">Walk: Source "Business Type" → Live Model Classification → Leadership Decisions</div>
+<div class="nn-walk-row"><span class="nn-walk-lbl"><strong>Source data labelled "New Business"</strong> (${rawNNCount} of ${deals.length} Wrango deals)</span><span class="nn-walk-amt">${fm(rawNNTotal)}</span></div>
 <div class="nn-walk-row"><span class="nn-walk-lbl" style="color:#16a34a">+ <strong>Model adds:</strong> labelled "Existing" but first-ever combo or new channel</span><span class="nn-walk-amt pos">+${fm(adjPos)}</span></div>
-<div class="nn-walk-row"><span class="nn-walk-lbl" style="color:#dc2626">− <strong>Model removes:</strong> labelled "New Business" but combo appeared in prior period</span><span class="nn-walk-amt neg">−${fm(adjNeg)}</span></div>
+<div class="nn-walk-row"><span class="nn-walk-lbl" style="color:#dc2626">− <strong>Model removes:</strong> labelled "New Business" but combo/channel already existed</span><span class="nn-walk-amt neg">−${fm(adjNeg)}</span></div>
 <div class="nn-walk-row" style="border-top:2px solid var(--border);padding-top:8px;margin-top:2px"><span class="nn-walk-lbl"><strong>Model Net-New (${flagged.length} rows flagged)</strong></span><span class="nn-walk-amt final">${fm(corrNN)}</span></div>
 ${decCount>0?`<div class="nn-walk-row"><span class="nn-walk-lbl" style="color:#2337E8">↳ <strong>Leadership accepted additions:</strong> ${decPos>0?'+'+fm(decPos):'—'}</span><span class="nn-walk-amt" style="color:#2337E8">${decPos>0?'+'+fm(decPos):'—'}</span></div>
 <div class="nn-walk-row"><span class="nn-walk-lbl" style="color:#2337E8">↳ <strong>Leadership rejected inclusions:</strong> ${decNeg>0?'−'+fm(decNeg):'—'}</span><span class="nn-walk-amt" style="color:#2337E8">${decNeg>0?'−'+fm(decNeg):'—'}</span></div>
 <div class="nn-walk-row" style="background:var(--blue-lt);border-radius:6px;padding:8px 10px;margin-top:4px;border-top:none;"><span class="nn-walk-lbl"><strong>Final Net-New (after ${decCount} decision${decCount===1?'':'s'})</strong></span><span class="nn-walk-amt final">${fm(finalNN)}</span></div>`:''}
 ${repBreakdownHtml}
+<div style="font-size:9px;color:var(--text3);margin-top:6px;">This is what now drives net-new vs. recurring quota attainment for Wrango reps (as of 2026-07-30) — not just a side-panel comparison.</div>
 </div>`;
 
   // Sort: flagged first, then by agency
   deals.sort((a,b)=>{
-    if(a.nn_flag&&!b.nn_flag)return-1;if(!a.nn_flag&&b.nn_flag)return 1;
+    const af=liveWrangoNN(a)!==rawBizTypeIsNN(a),bf=liveWrangoNN(b)!==rawBizTypeIsNN(b);
+    if(af&&!bf)return-1;if(!af&&bf)return 1;
     return(a.agency||'').localeCompare(b.agency||'');
   });
 
@@ -2582,10 +2686,10 @@ ${repBreakdownHtml}
   deals.forEach(d=>{if(effNN(d))totNN+=ms.reduce((s,m)=>s+(dMonth(d,m)),0);else totRec+=ms.reduce((s,m)=>s+(dMonth(d,m)),0);});
 
   const params=`<div class="nn-params">
-<strong>Net-New Classification Rules (HCP)</strong><br>
+<strong>Net-New Classification Rules (Wrango) — computed live from real deal data</strong><br>
 ① <strong>First-ever Agency / Advertiser / Brand combo:</strong> full campaign run is Net-New. Subsequent campaigns for same combo = Recurring.<br>
-② <strong>New Channel for known combo:</strong> first time a channel appears for a given A/A/B = Net-New for that channel's full campaign duration.<br>
-Lookback: <strong>all history 2024+</strong>. &nbsp;
+② <strong>New Channel for known combo:</strong> first time a channel appears for a given A/A/B = Net-New for that channel's founding campaign's full run. Channel is parsed from the IO Key (agency_advertiser_brand_<strong>channel</strong>_campaign_objective_segment), not Campaign Type.<br>
+Lookback: <strong>all booked history</strong>. &nbsp;
 <span style="color:#16a34a;font-weight:700;">■ Green rows</span> = proposed NN addition (model says NN, source says Existing). &nbsp;
 <span style="color:#dc2626;font-weight:700;">■ Red rows</span> = proposed NN removal (source says New Business, model reclassifies Recurring).
 </div>`;
@@ -2594,22 +2698,23 @@ Lookback: <strong>all history 2024+</strong>. &nbsp;
   deals.forEach(d=>{
     const pv=ms.reduce((s,m)=>s+(dMonth(d,m)),0);
     const rawBT=d.raw_biz_type||d.biz_type||'-';
-    const flag=d.nn_flag||'';
-    const rawBT_lc=rawBT.toLowerCase();
-    const rawIsNN=rawBT_lc.indexOf('new')>-1&&rawBT_lc.indexOf('existing')<0;
+    const rawIsNN=rawBizTypeIsNN(d);
+    const modelIsNN=liveWrangoNN(d);
+    const flag=modelIsNN!==rawIsNN;
+    const flagText=flag?liveWrangoNNReason(d):'';
     const id=nnDealId(d);
     const dec=DEC[id];
     // Row classification
-    const isAdd=flag&&d.custom_nn&&!rawIsNN;   // green: model adds NN
-    const isRem=flag&&!d.custom_nn&&rawIsNN;   // red: model removes NN
+    const isAdd=flag&&modelIsNN;   // green: model adds NN
+    const isRem=flag&&!modelIsNN;  // red: model removes NN
     let rowCls='';
     if(isAdd)rowCls='nn-add'+(dec?(' decided'):'');
     else if(isRem)rowCls='nn-rem'+(dec?(' decided'):'');
     else if(flag)rowCls='has-flag';
     // Classification badges
-    const modelBadge=d.custom_nn?'<span class="nn-badge nn">Net-New</span>':'<span class="nn-badge rec">Recurring</span>';
+    const modelBadge=modelIsNN?'<span class="nn-badge nn">Net-New</span>':'<span class="nn-badge rec">Recurring</span>';
     const effBadge=effNN(d)?'<span class="nn-badge nn">Net-New</span>':'<span class="nn-badge rec">Recurring</span>';
-    const changed=effNN(d)!==d.custom_nn;
+    const changed=effNN(d)!==modelIsNN;
     const rawBadge=rawBT&&rawBT!=='-'&&rawBT!=='None'
       ?'<span style="font-size:9px;color:var(--text2)">'+esc(rawBT)+'</span>'
       :'<span style="font-size:9px;color:var(--text3)">–</span>';
@@ -2624,14 +2729,14 @@ Lookback: <strong>all history 2024+</strong>. &nbsp;
       }
     }
     // Enhanced commentary
-    const noteHtml=flag?`<div style="font-size:8.5px;color:${isAdd?'#16a34a':isRem?'#dc2626':'#b45309'};font-weight:600;line-height:1.5;">${esc(flag)}</div>`:'';
+    const noteHtml=flag?`<div style="font-size:8.5px;color:${isAdd?'#16a34a':isRem?'#dc2626':'#b45309'};font-weight:600;line-height:1.5;">${esc(flagText)}</div>`:'';
     rows+=`<tr class="${rowCls}">
 <td style="font-size:10px;">${esc(d.agency||'—')}</td>
 <td style="font-size:10px;">${esc(d.advertiser||'—')}</td>
 <td style="font-size:10px;">${esc(d.brand||'—')}</td>
 <td style="max-width:150px;font-size:9px;">${esc(d.campaign||'—')}</td>
 <td style="font-size:10px;white-space:nowrap;font-weight:600;">${esc(d.rep||'—')}</td>
-<td style="font-size:10px;">${esc(d.channel||'–')}</td>
+<td style="font-size:10px;">${esc(dealChannel(d)||'–')}</td>
 <td style="font-size:9px;white-space:nowrap;">${d.start||'—'}</td>
 <td style="font-size:9px;white-space:nowrap;">${d.end||'—'}</td>
 <td style="font-size:9px;white-space:nowrap;">${d.bk_qkey||'—'}</td>
@@ -2643,13 +2748,13 @@ Lookback: <strong>all history 2024+</strong>. &nbsp;
   });
 
   const totRow=`<tr style="background:var(--bg);font-weight:800;border-top:2px solid var(--border);">
-<td colspan="9"><strong>Total HCP Booked (effective classification)${S.nnRepF!=='all'?' · '+S.nnRepF:''}</strong></td>
+<td colspan="9"><strong>Total Wrango Booked (effective classification)${S.nnRepF!=='all'?' · '+S.nnRepF:''}</strong></td>
 <td style="text-align:right;">${fm(totNN+totRec)}</td>
 <td></td><td style="font-size:9px;">${fm(totNN)} NN · ${fm(totRec)} Rec</td><td></td>
 </tr>`;
 
   const filterBar=buildNNFilterBar(allReps);
-  const activeFilters=(S.nnRepF!=='all'||S.nnBuF!=='all'||S.nnAgencyF)?`<div style="font-size:9px;color:var(--text3);padding-bottom:4px;">${deals.length} of ${allHCPDeals.length} HCP deals shown (filters active)</div>`:'';
+  const activeFilters=(S.nnRepF!=='all'||S.nnBuF!=='all'||S.nnAgencyF)?`<div style="font-size:9px;color:var(--text3);padding-bottom:4px;">${deals.length} of ${allWrangoDeals.length} Wrango deals shown (filters active)</div>`:'';
   const html=`<div class="nn-rec-section">
 ${filterBar}${activeFilters}
 ${walkHtml}${params}
@@ -3702,8 +3807,16 @@ function recomputeActuals(){
     if(!repData)return;
     const buData=repData[deal.bu];
     if(!buData)return;
-    const rt=(deal.rev_type==='net_new')?'net_new':'recurring';
-    if(!buData[rt])return;
+    // Wrango: bucket by the live, channel-aware reconciled classification
+    // (effNN — includes leadership Accept/Reject decisions), not raw SF
+    // Business Type, so net-new quota attainment reflects what actually
+    // happened at the channel level (2026-07-30). Clue: unchanged, raw rev_type.
+    const isNetNew=deal.bu==='wrango'?effNN(deal):deal.rev_type==='net_new';
+    const rt=isNetNew?'net_new':'recurring';
+    // Auto-create the bucket if this rep's quota structure never had one
+    // (e.g. a net-new-only hunter whose deal just got reclassified to
+    // recurring) — otherwise the revenue silently vanishes (2026-08-12 fix).
+    if(!buData[rt])buData[rt]={};
     Object.entries(deal.monthly||{}).forEach(([m,v])=>{
       const mi=parseInt(m);
       if(!buData[rt][mi])buData[rt][mi]={quota:0,actual:0,pipeline:0};
